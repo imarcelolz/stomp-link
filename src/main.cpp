@@ -2,6 +2,7 @@
 #include <unordered_map>
 
 #define MIDI_SERIAL Serial1
+#define LED_BRIGHTNESS 10
 
 #define LED_MAIN 5
 
@@ -92,7 +93,7 @@ void setup()
   delay(500);
 
   // System status indicator
-  digitalWrite(LED_MAIN, HIGH);
+  analogWrite(LED_MAIN, LED_BRIGHTNESS);
 }
 
 void doneLoop()
@@ -114,7 +115,7 @@ void onCombo(int comboId)
   Serial.printf("Combo activated: %s\n", combo.name);
 
   setLed(combo.led1);
-  digitalWrite(combo.led2, HIGH);
+  analogWrite(combo.led2, LED_BRIGHTNESS);
   sendMIDICC(combo.ccCommand);
 
   doneLoop();
@@ -210,8 +211,8 @@ void setLed(int pin)
 {
   for (int led : leds)
   {
-    digitalWrite(led, LOW);
+    analogWrite(led, 0);
   }
 
-  digitalWrite(pin, HIGH);
+  analogWrite(pin, LED_BRIGHTNESS);
 }
