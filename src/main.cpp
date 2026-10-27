@@ -1,5 +1,13 @@
 #include <Arduino.h>
-#include <unordered_map>
+#include <Preferences.h>
+
+enum OperatingMode {
+  MODE_REACTOR = 0,
+  MODE_MOER = 1
+};
+
+OperatingMode currentMode = MODE_REACTOR;
+Preferences preferences;
 
 #define MIDI_SERIAL Serial1
 #define LED_BRIGHTNESS 10
@@ -20,31 +28,34 @@
 #define COMBO_2 2
 #define COMBO_3 3
 
+const unsigned long LONG_PRESS_THRESHOLD = 500;
+const unsigned long DEBOUNCE_DELAY = 30;
+
 struct Button {
   const char* name;
 
   int button;
   int led;
+
+  int ccMoer;
   int ccCommand;
-};
+  int ccLongPressCommand;
 
-struct Combo {
-  const char* name;
+  bool state;
+  bool lastState;
+  bool longPressHandled;
 
-  int button1;
-  int button2;
-  int led1;
-  int led2;
-
-  int ccCommand;
+  unsigned long pressedTime;
+  unsigned long lastDebounceTime;
 };
 
 Button buttons[] = {
-  {"Input 1", INPUT_1, LED_1, 10},
-  {"Input 2", INPUT_2, LED_2, 22},
-  {"Input 3", INPUT_3, LED_3, 11},
-  {"Input 4", INPUT_4, LED_4, 24},
+  {"Input 1", INPUT_1, LED_1, 10, 1, 30, false, false, false, 0, 0}, //compressor and tuner
+  {"Input 2", INPUT_2, LED_2, 22, 2, 21, false, false, false, 0, 0}, // drive e amp 1
+  {"Input 3", INPUT_3, LED_3, 11, 5, 22, false, false, false, 0, 0}, //delay e amp 2
+  {"Input 4", INPUT_4, LED_4, 24, 6, 0, false, false, false, 0, 0}, //mod e muda para pedal
 };
+
 
 std::unordered_map<int, Button> buttonMap = {
   {INPUT_1, buttons[0]},
@@ -53,24 +64,11 @@ std::unordered_map<int, Button> buttonMap = {
   {INPUT_4, buttons[3]},
 };
 
-Combo combos[] = {
-  {"Combo 1", INPUT_1, INPUT_2, LED_1, LED_2, 20},
-  {"Combo 2", INPUT_2, INPUT_3, LED_2, LED_3, 21},
-  {"Combo 3", INPUT_3, INPUT_4, LED_3, LED_4, 22},
-};
-
-std::unordered_map<int, Combo> comboMap = {
-  {COMBO_1, combos[0]},
-  {COMBO_2, combos[1]},
-  {COMBO_3, combos[2]},
-};
-
 int leds[] = {LED_1, LED_2, LED_3, LED_4};
 
 int currentPreset = 0;
-int currentCombo = 0;
 
-void sendMIDICC(uint8_t ccNumber);
+void sendMIDICC(uint8_t ccNumber, bool value);
 void setLed(int pin);
 
 void setup()
@@ -101,108 +99,98 @@ void doneLoop()
   delay(50);
 }
 
-void onCombo(int comboId)
+void onInput(int buttonPin)
 {
-  if(currentCombo == comboId) {
-    return;
-  }
+  auto input = buttonMap[buttonPin];
+  input.state = !input.state;
 
-  auto combo = comboMap[comboId];
-
-  Serial.println(combo.name);
-  currentCombo = comboId;
-
-  Serial.printf("Combo activated: %s\n", combo.name);
-
-  setLed(combo.led1);
-  analogWrite(combo.led2, LED_BRIGHTNESS);
-  sendMIDICC(combo.ccCommand);
+  Serial.println(input.name);
+  // setLed(input.led);
+  analogWrite(input.led, input.state ? LED_BRIGHTNESS : 0);
+  sendMIDICC(input.ccCommand, input.state);
 
   doneLoop();
 }
 
-void onInput(int buttonPin)
+void onNewInputLongPress(Button* input)
 {
-  if (currentPreset == buttonPin) {
+  bool rawReading = (digitalRead(input->button) == LOW);
+  unsigned long now = millis();
+
+  if (rawReading && !input->longPressHandled && (now - input->pressedTime >= LONG_PRESS_THRESHOLD)) {
+    input->longPressHandled = true;
+    sendMIDICC(input->ccLongPressCommand, 0x7F);
     return;
   }
 
-  auto input = buttonMap[buttonPin];
-  Serial.println(input.name);
-  currentCombo = 0;
-  currentPreset = input.button;
+  if (rawReading == input->lastState) {
+    return;
+  }
 
-  setLed(input.led);
-  sendMIDICC(input.ccCommand);
+  if ((now - input->lastDebounceTime) < DEBOUNCE_DELAY) {
+    return;
+  }
 
-  doneLoop();
+  input->lastDebounceTime = now;
+  input->lastState = rawReading;
+
+  if (rawReading) {
+    input->pressedTime = now;
+    input->longPressHandled = false;
+    return;
+  }
+
+  if (input->longPressHandled) {
+    return;
+  }
+
+  input->state = !input->state;
+  analogWrite(input->led, input->state ? LED_BRIGHTNESS : 0);
+  sendMIDICC(input->ccCommand, input->state ? 0x7F : 0x00);
+}
+
+void onNewInput(Button* input)
+{
+  bool rawReading = (digitalRead(input->button) == LOW);
+  unsigned long now = millis();
+
+  if (rawReading == input->lastState) {
+    return;
+  }
+
+  if ((now - input->lastDebounceTime) < DEBOUNCE_DELAY) {
+    return;
+  }
+
+  input->lastDebounceTime = now;
+  input->lastState = rawReading;
+
+  if (rawReading) {
+    return;
+  }
+
+  input->state = !input->state;
+  analogWrite(input->led, input->state ? LED_BRIGHTNESS : 0);
+  sendMIDICC(input->ccCommand, input->state ? 0x7F : 0x00);
 }
 
 void loop()
 {
-  bool input1 = digitalRead(INPUT_1) == HIGH;
-  bool input2 = digitalRead(INPUT_2) == HIGH;
-  bool input3 = digitalRead(INPUT_3) == HIGH;
-  bool input4 = digitalRead(INPUT_4) == HIGH;
+  for(int i = 0; i < 4; i++) {
+    auto input = buttons[i];
 
-  if (!input1 && !input2 && !input3 && !input4)
-  {
-    return doneLoop();
+    onNewInput(&buttons[i]);
   }
 
-  delay(50);
-
-  input1 = digitalRead(INPUT_1) == HIGH;
-  input2 = digitalRead(INPUT_2) == HIGH;
-  input3 = digitalRead(INPUT_3) == HIGH;
-  input4 = digitalRead(INPUT_4) == HIGH;
-
-  Serial.printf("inputs-2: %d %d %d %d\n", input1, input2, input3, input4);
-
-  if (input1 && input2)
-  {
-    return onCombo(COMBO_1);
-  }
-
-  if (input2 && input3)
-  {
-    return onCombo(COMBO_2);
-  }
-
-  if (input3 && input4)
-  {
-    return onCombo(COMBO_3);
-  }
-
-  if (input1)
-  {
-    return onInput(INPUT_1);
-  }
-
-  if (input2)
-  {
-    return onInput(INPUT_2);
-  }
-
-  if (input3)
-  {
-    return onInput(INPUT_3);
-  }
-
-  if (input4)
-  {
-    return onInput(INPUT_4);
-  }
+  delay(1);
 }
 
-void sendMIDICC(uint8_t ccNumber)
+void sendMIDICC(uint8_t ccNumber, bool value)
 {
   // 0xB0 é o Status Byte para Control Change no Canal 1
   MIDI_SERIAL.write(0xB0);
-  // O número do CC (10, 22, 11 ou 24)
   MIDI_SERIAL.write(ccNumber);
-  // Valor 127 (0x7F) para simular o "pressionar" do botão
-  MIDI_SERIAL.write(0x7F);
+  MIDI_SERIAL.write(value ? 0x7F : 0x00);
 
   Serial.printf("CC MIDI Enviado: %d value 127\n", ccNumber);
 }
